@@ -22,13 +22,14 @@ console.log('PORT from env:', process.env.PORT);
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const http = require('http');
+const https = require('https');
 const path = require('path');
 const cors = require('cors');
 const fs = require('fs').promises;
+const fsSync = require('fs');
 const { spawn } = require('child_process');
 const os = require('os');
 const pty = require('node-pty');
-const fetch = require('node-fetch');
 
 const { getProjects, getSessions, getSessionMessages, renameProject, deleteSession, deleteProject, addProjectManually } = require('./projects');
 const { spawnClaude, abortClaudeSession } = require('./claude-cli');
@@ -132,7 +133,23 @@ function getServerIP() {
 }
 
 const app = express();
-const server = http.createServer(app);
+
+// Check if HTTPS certificates exist
+let server;
+const certPath = path.join(__dirname, '../cert.pem');
+const keyPath = path.join(__dirname, '../key.pem');
+
+if (fsSync.existsSync(certPath) && fsSync.existsSync(keyPath)) {
+  console.log('HTTPS certificates found, starting HTTPS server');
+  const httpsOptions = {
+    cert: fsSync.readFileSync(certPath),
+    key: fsSync.readFileSync(keyPath)
+  };
+  server = https.createServer(httpsOptions, app);
+} else {
+  console.log('No HTTPS certificates found, starting HTTP server');
+  server = http.createServer(app);
+}
 
 // Single WebSocket server that handles both paths
 const wss = new WebSocketServer({ 
@@ -684,14 +701,19 @@ app.post('/api/transcribe', async (req, res) => {
     const upload = multer({ storage: multer.memoryStorage() });
     
     // Handle multipart form data
-    upload.single('audio')(req, res, async (err) => {
+    upload.fields([{ name: 'audio', maxCount: 1 }, { name: 'mode', maxCount: 1 }])(req, res, async (err) => {
       if (err) {
         return res.status(400).json({ error: 'Failed to process audio file' });
       }
       
-      if (!req.file) {
+      if (!req.files || !req.files.audio || !req.files.audio[0]) {
         return res.status(400).json({ error: 'No audio file provided' });
       }
+      
+      const audioFile = req.files.audio[0];
+      
+      console.log('Received audio file:', audioFile.originalname, audioFile.mimetype, audioFile.size, 'bytes');
+      console.log('Mode:', req.body.mode || 'default');
       
       const apiKey = process.env.OPENAI_API_KEY;
       if (!apiKey) {
@@ -699,37 +721,45 @@ app.post('/api/transcribe', async (req, res) => {
       }
       
       try {
-        // Create form data for OpenAI
-        const FormData = require('form-data');
+        // Create form data for OpenAI using native FormData
+        const { Blob } = require('buffer');
         const formData = new FormData();
-        formData.append('file', req.file.buffer, {
-          filename: req.file.originalname,
-          contentType: req.file.mimetype
-        });
+        
+        // Create a Blob from the buffer with the correct type
+        const audioBlob = new Blob([audioFile.buffer], { type: audioFile.mimetype });
+        
+        // Create a File object from the Blob
+        const audioFileObj = new File([audioBlob], audioFile.originalname, { type: audioFile.mimetype });
+        
+        formData.append('file', audioFileObj);
         formData.append('model', 'whisper-1');
         formData.append('response_format', 'json');
-        formData.append('language', 'en');
         
         // Make request to OpenAI
-        const fetch = require('node-fetch');
         const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${apiKey}`,
-            ...formData.getHeaders()
+            'Authorization': `Bearer ${apiKey}`
           },
           body: formData
         });
         
         if (!response.ok) {
-          const errorData = await response.json().catch(() => ({}));
-          throw new Error(errorData.error?.message || `Whisper API error: ${response.status}`);
+          const errorText = await response.text();
+          console.error('OpenAI API error:', response.status, errorText);
+          try {
+            const errorData = JSON.parse(errorText);
+            throw new Error(errorData.error?.message || `Whisper API error: ${response.status}`);
+          } catch {
+            throw new Error(`Whisper API error: ${response.status} - ${errorText}`);
+          }
         }
         
         const data = await response.json();
         let transcribedText = data.text || '';
         
         // Check if enhancement mode is enabled
+        // When using multer.fields(), text fields are still in req.body
         const mode = req.body.mode || 'default';
         
         // If no transcribed text, return empty
@@ -886,7 +916,11 @@ async function getFileTree(dirPath, maxDepth = 3, currentDepth = 0, showHidden =
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Claude Code UI server running on http://0.0.0.0:${PORT}`);
+  const protocol = server instanceof https.Server ? 'https' : 'http';
+  console.log(`Claude Code UI server running on ${protocol}://0.0.0.0:${PORT}`);
+  if (protocol === 'https') {
+    console.log('HTTPS enabled - microphone access should work on mobile devices');
+  }
   
   // Start watching the projects folder for changes
   setupProjectsWatcher();

@@ -35,6 +35,11 @@ export function useWebSocket() {
           // Use the proxied WebSocket through the same port as the frontend
           wsBaseUrl = `${protocol}//${window.location.host}`;
         }
+        
+        // Ensure WebSocket protocol matches page protocol
+        if (window.location.protocol === 'https:' && wsBaseUrl.startsWith('ws:')) {
+          wsBaseUrl = wsBaseUrl.replace('ws:', 'wss:');
+        }
       } catch (error) {
         console.warn('Could not fetch server config, falling back to proxy');
         // When config fails, use the proxied WebSocket path
