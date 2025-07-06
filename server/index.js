@@ -152,17 +152,37 @@ app.use('/api/git', gitRoutes);
 
 // API Routes
 app.get('/api/config', (req, res) => {
-  // Always use the server's actual IP and port for WebSocket connections
-  const serverIP = getServerIP();
-  const host = `${serverIP}:${PORT}`;
+  // Get various headers to determine the original request
+  const requestHost = req.get('host');
+  const xForwardedHost = req.get('x-forwarded-host');
+  const origin = req.get('origin');
   const protocol = req.protocol === 'https' || req.get('x-forwarded-proto') === 'https' ? 'wss' : 'ws';
   
-  console.log('Config API called - Returning host:', host, 'Protocol:', protocol);
-  
-  res.json({
-    serverPort: PORT,
-    wsUrl: `${protocol}://${host}`
+  console.log('Config API called - Headers:', {
+    host: requestHost,
+    xForwardedHost: xForwardedHost,
+    origin: origin,
+    referer: req.get('referer')
   });
+  
+  // If we have an origin (browser request), use that to determine the WebSocket URL
+  if (origin) {
+    const originUrl = new URL(origin);
+    const wsUrl = `${protocol}://${originUrl.host}`;
+    console.log('Using origin for WebSocket URL:', wsUrl);
+    res.json({
+      serverPort: PORT,
+      wsUrl: wsUrl
+    });
+  } else {
+    // Fallback to localhost for non-browser requests
+    const wsUrl = `ws://localhost:${PORT}`;
+    console.log('No origin, using localhost:', wsUrl);
+    res.json({
+      serverPort: PORT,
+      wsUrl: wsUrl
+    });
+  }
 });
 
 app.get('/api/projects', async (req, res) => {
